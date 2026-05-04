@@ -1,0 +1,68 @@
+services:
+  # 1. Database Service
+  cti_db:
+    image: postgres:15-alpine
+    container_name: cti_db
+    restart: always
+    environment:
+      POSTGRES_DB: CTI_Feed
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - cti_network
+
+  # 2. Python CTI Ingestion & Exporter Service
+  cti_app:
+    build: ./threatfox_to_waf
+    container_name: cti_app
+    restart: always
+    environment:
+      - DB_PASSWORD=${DB_PASSWORD}
+      - THREATFOX_API_KEY=${THREATFOX_API_KEY}
+    volumes:
+      # Shares the exported blocklist directly with the WAF container
+      - shared_waf_data:/etc/modsecurity/shared
+    depends_on:
+      - cti_db
+    networks:
+      - cti_network
+
+  # 3. Web Application Firewall (WAF) Service
+  waf:
+    image: owasp/modsecurity-crs:nginx
+    container_name: cti_waf
+    restart: always
+    ports:
+      - "80:8080" # Maps host port 80 to Nginx container port 8080
+    environment:
+      - PARANOIA=1
+      - BACKEND=http://backend_app:80
+    volumes:
+      # Mount our shared threat list into the WAF container
+      - shared_waf_data:/etc/modsecurity/shared:ro
+      - ./waf/modsec_custom.conf:/etc/modsecurity.d/modsec_custom.conf:ro
+    depends_on:
+      - cti_app
+    networks:
+      - cti_network
+
+  # 4. A simple backend app
+  backend_app:
+    image: nginx:alpine
+    container_name: cti_backend
+    restart: always
+    # No ports exposed to the host; only the WAF container can talk to it inside the network
+    networks:
+      - cti_network
+
+volumes:
+  postgres_data:
+  shared_waf_data:
+
+networks:
+  cti_network:
+    driver: bridge
