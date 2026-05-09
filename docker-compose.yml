@@ -41,6 +41,8 @@ services:
     environment:
       - PARANOIA=1
       - BACKEND=http://backend_app:80
+      - MODSECURITY_ENABLED=on
+      - MODSECURITY_RULE_ENGINE=On
     volumes:
       # Mount our shared threat list into the WAF container
       - shared_waf_data:/etc/modsecurity/shared:ro
