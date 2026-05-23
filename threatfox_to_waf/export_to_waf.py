@@ -1,48 +1,73 @@
+# export_to_waf.py
 import os
-import time
+import subprocess
 import psycopg2
-from pathlib import Path
+from dotenv import load_dotenv
 
+load_dotenv()
+
+DB_PASS = os.getenv("DB_PASSWORD")
 DB_CONFIG = {
-    "host": "cti_db", # Resolves to the database container name on cti_network
+    "host": "localhost",
     "port": "5432",
     "database": "CTI_Feed",
     "user": "postgres",
-    "password": os.getenv("DB_PASSWORD")
+    "password": DB_PASS
 }
 
-OUTPUT_FILE = Path("/etc/modsecurity/shared/ip_blocklist.txt")
+WAF_BLOCKLIST_PATH = "/etc/modsecurity/blocked_ips.data"
 
-def export_active_iocs():
+def export_threat_intel():
+    print("Executing dynamic database-to-WAF CTI feed deployment...")
+    
     try:
-        # Create output path if it doesn't exist
-        OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
-        
+        # Establish link to  local PostgreSQL CTI_Feed database
         conn = psycopg2.connect(**DB_CONFIG)
-        with conn.cursor() as cur:
-            # Query for active IPs
-            query = "SELECT ioc_value FROM prioritized_iocs WHERE status = 'active' AND ioc_type = 'ip:port';"
-            cur.execute(query)
-            rows = cur.fetchall()
-
-        ips = {row[0].split(':')[0] for row in rows}
-
-        # Write out to the shared volume
-        with open(OUTPUT_FILE, 'w') as f:
-            for ip in ips:
-                f.write(f"{ip}\n")
+        cur = conn.cursor()
         
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Success: Synchronized {len(ips)} IPs with WAF.")
+        # Pull active indicators that contain IP data elements
+        query = """
+        SELECT DISTINCT ioc_value 
+        FROM prioritized_iocs 
+        WHERE status = 'active' 
+          AND ioc_type IN ('ip:port', 'IPv4', 'ip');
+        """
+        cur.execute(query)
+        rows = cur.fetchall()
+        
+        # Clear ports if present (e.g., "185.220.101.5:8080" -> "185.220.101.5")
+        blocked_ips = set()
+        for row in rows:
+            raw_val = row[0]
+            if raw_val:
+                ip = raw_val.split(':')[0].strip()
+                blocked_ips.add(ip)
+                
+        print(f"Extracted {len(blocked_ips)} unique active threat IPs from your PostgreSQL tables.")
 
-    except Exception as e:
-        print(f"Sync failed: {e}")
-    finally:
-        if 'conn' in locals():
+        if not blocked_ips:
+            print("No active malicious IPs found in database. Skipping compilation.")
+            cur.close()
             conn.close()
+            return
+
+        # Write clean, sorted items out to the ModSecurity text file destination
+        with open(WAF_BLOCKLIST_PATH, "w") as out_file:
+            for ip in sorted(blocked_ips):
+                out_file.write(f"{ip}\n")
+                
+        print(f"Successfully compiled network blocklist inside {WAF_BLOCKLIST_PATH}")
+        
+        # Gracefully reload Nginx to push live changes into the worker rules engine
+        print("Reloading Nginx engine configurations...")
+        subprocess.run(["sudo", "systemctl", "reload", "nginx"], check=True)
+        print("WAF threat intel synchronization complete. Core operational.")
+        
+        cur.close()
+        conn.close()
+        
+    except Exception as e:
+        print(f"Pipeline Sync Failure: {e}")
 
 if __name__ == "__main__":
-    # Continuous loop simulating cron within the container
-    while True:
-        export_active_iocs()
-        # Wait 1 hour (3600 seconds) before the next sync
-        time.sleep(3600)
+    export_threat_intel()
