@@ -43,7 +43,7 @@ def export_threat_intel():
                 ip = raw_val.split(':')[0].strip()
                 blocked_ips.add(ip)
                 
-        print(f"Extracted {len(blocked_ips)} unique active threat IPs from your PostgreSQL tables.")
+        print(f"Extracted {len(blocked_ips)} unique active threat IPs.")
 
         if not blocked_ips:
             print("No active malicious IPs found in database. Skipping compilation.")

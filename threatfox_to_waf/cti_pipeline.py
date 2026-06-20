@@ -27,6 +27,7 @@ DB_CONFIG = {
 MIN_CONFIDENCE = 75
 TARGET_THREATS = ['botnet_cc', 'payload_delivery'] 
 TARGET_AV_TYPES = ['IPv4', 'domain', 'hostname', 'url', 'FileHash-SHA256'] 
+MAX_IOC_RECORDS = 100000  # Storage limits
 
 def connect_to_db():
     try:
@@ -164,12 +165,58 @@ def upsert_prioritized_data(conn, combined_records):
         conn.commit()
         print(f"Database updated with {len(combined_records)} total records from active feeds.")
 
+
 def cleanup_stale_data(conn):
-    query = "UPDATE prioritized_iocs SET status = 'expired' WHERE last_updated < NOW() - INTERVAL '7 days';"
-    with conn.cursor() as cur:
-        cur.execute(query)
+    """
+    Handles data eviction based on age, status, and maximum row limits.
+    """
+    try:
+        with conn.cursor() as cur:
+            # Hard delete anything marked 'expired' or untouched for over 14 days
+            purge_query = """
+            DELETE FROM prioritized_iocs 
+            WHERE status = 'expired' 
+               OR last_updated < NOW() - INTERVAL '14 days';
+            """
+            cur.execute(purge_query)
+            deleted_stale = cur.rowcount
+            print(f"Purged {deleted_stale} stale/expired records from the database.")
+
+            # Soft-expire active records older than 7 days
+            expire_query = """
+            UPDATE prioritized_iocs 
+            SET status = 'expired' 
+            WHERE status = 'active' 
+              AND last_updated < NOW() - INTERVAL '7 days';
+            """
+            cur.execute(expire_query)
+            
+            # If the database exceeds MAX_IOC_RECORDS, evict the oldest updated items first.
+            count_query = "SELECT COUNT(*) FROM prioritized_iocs;"
+            cur.execute(count_query)
+            current_count = cur.fetchone()[0]
+
+            if current_count > MAX_IOC_RECORDS:
+                overflow = current_count - MAX_IOC_RECORDS
+                # Delete low confidence/oldest first
+                evict_query = """
+                DELETE FROM prioritized_iocs 
+                WHERE id IN (
+                    SELECT id FROM prioritized_iocs 
+                    ORDER BY 
+                        CASE WHEN threat_type IN ('botnet_cc', 'payload_delivery') THEN 1 ELSE 0 END ASC,
+                        confidence_level ASC,
+                        last_updated ASC
+                    LIMIT %s
+                );
+                """
+                cur.execute(evict_query, (overflow,))
+                print(f"Database limit exceeded ({current_count}/{MAX_IOC_RECORDS}). Evicted {cur.rowcount} low-priority records.")
+
         conn.commit()
-        print("Cleaned up stale indicators.")
+    except Exception as e:
+        conn.rollback()
+        print(f"Error during database cleanup/eviction: {e}")
 
 def main():
     conn = connect_to_db()
